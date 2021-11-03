@@ -1,0 +1,301 @@
+---
+title: "Analyze data using ArchR"
+author: "Zhijian Li"
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(ggplot2)
+library(stringr)
+library(magrittr)
+library(WriteXLS)
+library(tidyr)
+library(dplyr)
+library(plotly)
+library(cluster)
+library(cowplot)
+library(gridExtra)
+library(viridis)
+library(GenomicRanges)
+library(GenomeInfoDb)
+library(data.table)
+library(ArchR)
+library(Seurat)
+library(ComplexHeatmap)
+```
+
+```{r set_parameters, echo=FALSE}
+## set parameters
+set.seed(42)
+addArchRThreads(threads = parallel::detectCores() - 2)
+addArchRGenome("hg38")
+
+proj <- loadArchRProject(path = "./HFFiltering", showLogo = FALSE)
+
+obj.rna <- readRDS("../../snRNA/raw_integrated_update_metadata.rds")
+```
+
+
+## create seurat object for ATAC-seq
+```{r}
+geneMatrix <- getMatrixFromProject(proj, useMatrix = "GeneScoreMatrix")
+GeneScoreMatrix <- geneMatrix@assays@data$GeneScoreMatrix
+rownames(GeneScoreMatrix) <- geneMatrix@elementMetadata$name
+
+obj.atac <- CreateSeuratObject(counts = GeneScoreMatrix,
+                               meta.data = as.data.frame(geneMatrix@colData),
+                               assay = "GeneActivity") %>%
+    NormalizeData()
+
+embedding <- proj@reducedDims$Harmony$matDR
+
+colnames(embedding) <- paste0("LSI_", seq_along(1:ncol(embedding)))
+
+obj.atac@reductions[['lsi']] <- CreateDimReducObject(embeddings = as.matrix(embedding),
+                                                         key = "LSI_",
+                                                         assay = "GeneActivity") 
+
+
+embedding <- proj@embeddings$UMAP_Harmony$df
+colnames(embedding) <- paste0("UMAP_", seq_along(1:ncol(embedding)))
+
+
+obj.atac@reductions[['umap']] <- CreateDimReducObject(embeddings = as.matrix(embedding),
+                                                         key = "UMAP_",
+                                                         assay = "GeneActivity")
+
+
+```
+
+
+## visualize ATAC-seq and RNA-seq annotation
+```{r}
+pal <- ArchR::paletteDiscrete(values = obj.rna$CellType)
+
+print(pal)
+
+p1 <- DimPlot(obj.atac, reduction = "umap", group.by = "CellType",
+              cols = pal) +
+    ggtitle("ATAC")
+
+p2 <- DimPlot(obj.rna, reduction = "umap", group.by = "CellType",
+              cols = pal) +
+    ggtitle("RNA")
+
+p1
+p2
+
+```
+
+
+## correlation between ATAC-seq and RNA-seq for each cell type
+```{r cor, fig.height=6, fig.width=6}
+################# use all genes for correlation
+commonGenes <- intersect(rownames(obj.rna), rownames(obj.atac))
+
+print(length(commonGenes))
+
+aveGeneScore <- AverageExpression(obj.atac, group.by = "CellType", 
+                                  features = commonGenes,
+                                  assays = "GeneActivity")$GeneActivity
+
+aveGeneExp <- AverageExpression(obj.rna, group.by = "CellType", 
+                                features = commonGenes,
+                                assays = "RNA")$RNA
+
+
+x <- as.data.frame(aveGeneScore)
+y <- as.data.frame(aveGeneExp)
+
+y$lymphatic_endo <- NULL
+
+x <- x[, colnames(y)]
+
+
+df_cor <- cor(x = x, y = y)
+
+p <- Heatmap(as.matrix(df_cor),
+             col = paletteContinuous(set = "greenBlue"),
+             cluster_rows = FALSE,
+             cluster_columns = FALSE,
+             name = "Pearson")
+
+p
+
+
+################# use HV genes for correlation
+hvg <- read.csv("../../snRNA/hvg.csv", header = F)
+
+VariableFeatures(obj.rna) <- hvg$V1
+
+commonGenes <- intersect(VariableFeatures(obj.rna), rownames(obj.atac))
+
+print(length(commonGenes))
+
+aveGeneScore <- AverageExpression(obj.atac, group.by = "CellType", 
+                                  features = commonGenes,
+                                  assays = "GeneActivity")$GeneActivity
+
+aveGeneExp <- AverageExpression(obj.rna, group.by = "CellType", 
+                                features = commonGenes,
+                                assays = "RNA")$RNA
+
+
+x <- as.data.frame(aveGeneScore)
+y <- as.data.frame(aveGeneExp)
+
+y$lymphatic_endo <- NULL
+x <- x[, colnames(y)]
+
+df_cor <- cor(x = x, y = y)
+
+p <- Heatmap(as.matrix(df_cor),
+             col = paletteContinuous(set = "greenBlue"),
+             cluster_rows = FALSE,
+             cluster_columns = FALSE,
+             name = "Pearson")
+
+p
+```
+
+
+
+## co-embedding
+```{r co-embedding, fig.height=4, fig.width=10}
+if(!dir.exists("./Coembedding")){
+    dir.create("./Coembedding")
+}
+
+
+Idents(obj.atac) <- "Patient"
+Idents(obj.rna) <- "Patient"
+
+# here we generate pseudo-RNA for each patient
+for (patient in unique(obj.atac$Patient)) {
+    obj.atac.sub <- subset(obj.atac, idents = patient) %>%
+        NormalizeData() %>%
+        FindVariableFeatures() %>%
+        ScaleData()
+
+    obj.rna.sub <- subset(obj.rna, idents = patient) %>%
+        FindVariableFeatures()
+
+    # Identify anchors
+    transfer.anchors <- FindTransferAnchors(reference = obj.rna.sub,
+                                            query = obj.atac.sub,
+                                            features = VariableFeatures(obj.rna.sub),
+                                            reference.assay = "RNA",
+                                            query.assay = "GeneActivity", 
+                                            reduction = "cca")
+
+    # note that we restrict the imputation to variable genes from scRNA-seq, but could impute the full transcriptome if we wanted to
+    genes.use <- VariableFeatures(obj.rna.sub)
+    refdata <- GetAssayData(obj.rna.sub, assay = "RNA", slot = "data")[genes.use, ]
+
+    # refdata (input) contains a scRNA-seq expression matrix for the scRNA-seq cells.  imputation
+    # (output) will contain an imputed scRNA-seq matrix for each of the ATAC cells
+    imputation <- TransferData(anchorset = transfer.anchors, refdata = refdata,
+                               weight.reduction = obj.atac.sub[["lsi"]],
+                               dims = 2:30)
+
+    obj.atac.sub[["RNA"]] <- imputation
+
+    obj.atac.sub$tech <- "ATAC"
+    obj.rna.sub$tech <- "RNA"
+
+    coembed <- merge(x = obj.rna.sub, y = obj.atac.sub)
+
+    # Finally, we run PCA and UMAP on this combined object, to visualize the co-embedding of both
+    # datasets
+    coembed <- ScaleData(coembed, features = genes.use, do.scale = FALSE)
+    coembed <- RunPCA(coembed, features = genes.use, verbose = FALSE)
+    coembed <- RunUMAP(coembed, dims = 1:30)
+
+    p <- DimPlot(coembed, group.by = "CellType", split.by = "tech",
+                 label = TRUE, cols = pal) +
+        ggtitle(patient)
+
+    print(p)
+
+    saveRDS(coembed, file = glue::glue("./Coembedding/{patient}_snATAC_snRNA.Rds"))
+}
+
+```
+
+## add RNA-seq
+```{r}
+# We here try to add a pesudo gene matrix by looking at the nearest neighbor from ATAC to RNA in co-embedding space
+library(RANN)
+library(SummarizedExperiment)
+
+spMat <- lapply(unique(proj$Patient), function(patient){
+    coembed <- readRDS(glue::glue("./Coembedding/{patient}_snATAC_snRNA.Rds"))
+
+    atac.cells <- colnames(coembed)[coembed$tech == "ATAC"]
+    rna.cells <- colnames(coembed)[coembed$tech == "RNA"]
+
+    embedding.atac <- coembed@reductions$pca@cell.embeddings[atac.cells, ]
+    embedding.rna <- coembed@reductions$pca@cell.embeddings[rna.cells, ]
+
+    nn <- nn2(embedding.rna,
+              embedding.atac, k = 1)
+
+    matched.cells <- rna.cells[nn$nn.idx]
+
+    obj.rna <- subset(coembed, cells = matched.cells, slot = "counts")
+    spMat <- as.matrix(obj.rna@assays$RNA@counts)
+    colnames(spMat) <- atac.cells
+    spMat
+
+}) %>% Reduce(cbind, .)
+
+
+saveRDS(spMat, "./Coembedding/GeneIntegration.Rds")
+
+rowRanges <- rowData(geneMatrix)
+
+sel_genes <- intersect(rownames(spMat), rowRanges$name)
+spMat <- spMat[sel_genes, ]
+#rowRanges <- subset(rowRanges, name %in% sel_genes)
+rownames(rowRanges) <- rowRanges$name
+rowRanges <- rowRanges[sel_genes, ]
+
+rowRanges <- GRanges(rowRanges$seqnames,
+                     IRanges(start = as.numeric(rowRanges$start),
+                             end = as.numeric(rowRanges$start) + 1))
+
+
+seRNA <- SummarizedExperiment(assays = SimpleList(counts = spMat),
+                              rowRanges = rowRanges)
+
+proj <- addGeneExpressionMatrix(proj,
+                                seRNA = seRNA,
+                                force = TRUE)
+getAvailableMatrices(proj)
+
+peakMatrix <- getMatrixFromProject(proj,
+                                   useMatrix = "PeakMatrix")
+
+counts <- peakMatrix@assays@data$PeakMatrix
+df_rangers <- as.data.frame(peakMatrix@rowRanges@ranges)
+
+rownames(counts) <- paste(peakMatrix@rowRanges@seqnames,
+                          df_rangers$start,
+                          df_rangers$end,
+                          sep = "_")
+
+saveRDS(counts, file = "./HFFiltering/PeakMatrix.Rds")
+```
+
+
+## save data
+```{r}
+saveArchRProject(ArchRProj = proj, 
+                 load = FALSE)
+```
+
+## Session information
+```{r}
+sessionInfo()
+```

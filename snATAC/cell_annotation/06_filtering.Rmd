@@ -1,0 +1,172 @@
+---
+title: "Analyze data using ArchR"
+author: "Zhijian Li"
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(ggplot2)
+library(stringr)
+library(magrittr)
+library(WriteXLS)
+library(tidyr)
+library(dplyr)
+library(plotly)
+library(cluster)
+library(cowplot)
+library(gridExtra)
+library(viridis)
+library(GenomicRanges)
+library(GenomeInfoDb)
+library(data.table)
+library(ArchR)
+library(Seurat)
+```
+
+```{r set_parameters, echo=FALSE}
+## set parameters
+set.seed(42)
+addArchRThreads(threads = parallel::detectCores() - 2)
+addArchRGenome("hg38")
+```
+
+## Loading Arrow Files
+```{r}
+proj <- loadArchRProject(path = "./HF", showLogo = FALSE)
+
+cols.condition <- c("Health" = "#e41a1c", 
+                    "HD" = "#377eb8", 
+                    "HTN" = "#4daf4a",
+                    "HF_StageC" = "#984ea3")
+
+obj <- readRDS("./HF/Seurat.Rds")
+
+meta.data <- obj@meta.data
+meta.data <- meta.data[rownames(proj), ]
+
+opt_res <- 0.3
+clusters <- meta.data[, paste("RNA_snn_res.", opt_res, sep="")]
+
+proj <- addCellColData(proj, 
+                       data =  as.character(clusters), 
+                       name = "Clusters", 
+                       cells = rownames(proj), 
+                       force = TRUE)
+```
+## add patient information
+```{r}
+sample2patient.atac <- c("CK100" = "YA5468",
+                        "CK101" = "YHJ323",
+                        "CK102" = "YKB285",
+                        "CK104" = "YJM250",
+                        "CK105" = "YFV238",
+                        "CK106" = "YHC474",
+                        "CK107" = "YFV428",
+                        "CK108" = "XG3005",
+                        "CK109" = "ZKY095",
+                        "CK110" = "YEI202",
+                        "CK111" = "YIH108",
+                        "CK112" = "YHN332",
+                        "CK130" = "YH5394",
+                        "CK131" = "YID393",
+                        "CK132" = "YF2299",
+                        "CK133" = "AABD005")
+
+proj@cellColData$Patient <- stringr::str_replace_all(proj@cellColData$Sample, sample2patient.atac)
+```
+
+
+## remove low quality cluster
+```{r}
+# filter cluster 3 out
+df <- proj@cellColData %>%
+    subset(., Clusters %ni% c(3, 10))
+
+# remove HF_C
+df <- subset(df, Condition != "HF_StageC" & Patient %ni% c("AABD005", "YIH108"))
+
+proj <- subsetArchRProject(proj, 
+                           cells = rownames(df),
+                           outputDirectory = "./HFFiltering",
+                           force = TRUE)
+```
+
+
+## visualize cluster
+```{r, fig.height=6, fig.width=6}
+p1 <- plotEmbedding(ArchRProj = proj, 
+                    colorBy = "cellColData", 
+                    name = "Clusters", 
+                    embedding = "UMAP_Harmony",
+                    labelAsFactors = FALSE,
+                    plotAs = "points") +
+    theme_classic() +
+    xlab("UMAP1") + ylab("UMAP2")
+    
+print(p1)
+```
+
+
+## visualize marker genes
+```{r, fig.height=8, fig.width=6}
+markerGenes  <- c(
+    "TNNT2", "RYR2", "TNNT1", 
+    "MYOM3", "MYLK3", "CAMK2B", #cardiomyocyte
+    "PDGFRB", "DCN", "SCARA5", "COL15A1", #fibroblast
+    "CD163", "CD86", "HCK", "SLC11A1", "SIGLEC1", #monocytes
+    "PECAM1", "VWF", "EGFL7", "EMCN", "ERG", "TIE1", #endothelial
+    "NOTCH3", "RGS5", "ABCC9", "COX4I2", "EGFLAM", #pericyte
+    "PTPRC", "CD247", "CD2", "ITK", "PRKCQ", # T-cells
+    "NRXN1", "SOX10", "SPP1", "GRIK3", #neuronal
+    "ADIPOQ", "PLIN1", "FASN", #adipocytes
+    "KIT", "CPA3", "SLC38A11", "SLC8A3", #mast_cells
+    "MYH11", "MYLK" #vSMCs
+    )
+
+markersGS <- getMarkerFeatures(
+    ArchRProj = proj,
+    useMatrix = "GeneScoreMatrix",
+    groupBy = "Clusters",
+    bias = c("TSSEnrichment", "log10(nFrags)"),
+    testMethod = "wilcoxon"
+)
+
+markerList <- getMarkers(markersGS,
+                         cutOff = "FDR <= 0.01 & Log2FC >= 1")
+
+heatmapGS <- plotMarkerHeatmap(
+  seMarker = markersGS,
+  cutOff = "FDR <= 0.01 & Log2FC >= 1",
+  labelMarkers = markerGenes
+)
+
+ComplexHeatmap::draw(heatmapGS,
+                     heatmap_legend_side = "bot",
+                     annotation_legend_side = "bot")
+
+markerList <- getMarkers(markersGS)
+markerList <- lapply(markerList, as.data.frame)
+
+saveRDS(markersGS, file = "./HFFiltering/MarkerGenes.Rds")
+
+for(i in 1:length(markerList)){
+    markerList[[i]] <- markerList[[i]][order(-markerList[[i]]$MeanDiff), ]
+}
+
+WriteXLS::WriteXLS(markerList,
+                   ExcelFileName = "./HFFiltering/MarkerGenes.xlsx",
+                   SheetNames = names(markerList))
+```
+
+
+## save data
+```{r}
+saveArchRProject(ArchRProj = proj, 
+                 load = FALSE)
+```
+
+## Session information
+```{r}
+sessionInfo()
+```

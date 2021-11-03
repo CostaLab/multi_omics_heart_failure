@@ -1,0 +1,216 @@
+---
+title: "Analyze data using ArchR"
+author: "Zhijian Li"
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(ggplot2)
+library(stringr)
+library(magrittr)
+library(WriteXLS)
+library(tidyr)
+library(dplyr)
+library(plotly)
+library(cluster)
+library(cowplot)
+library(gridExtra)
+library(viridis)
+library(GenomicRanges)
+library(GenomeInfoDb)
+library(data.table)
+library(ArchR)
+```
+
+```{r set_parameters, echo=FALSE}
+## set parameters
+set.seed(42)
+addArchRThreads(threads = parallel::detectCores() - 2)
+addArchRGenome("hg38")
+```
+
+## Loading Arrow Files
+```{r}
+proj <- loadArchRProject(path = "./HF", showLogo = FALSE)
+
+newLabels <- c(
+    'CK100' = 'Health',
+    'CK101' = 'Health',
+    'CK102' = 'HD',
+    'CK104' = 'HTN',
+    'CK105' = 'HD',
+    'CK106' = 'HTN',
+    'CK107' = 'HD',
+    'CK108' = 'HF_StageC',
+    'CK109' = 'HD',
+    'CK110' = 'HTN',
+    'CK111' = 'Health',
+    'CK112' = 'HTN',
+    'CK130' = 'Health',
+    'CK131' = 'Health',
+    'CK132' = 'HTN',
+    'CK133' = 'HD'
+    )
+
+
+proj$Condition <- mapLabels(proj$Sample, 
+                           newLabels = newLabels,
+                           oldLabels = names(newLabels))
+
+cols.condition <- c("Health" = "#e41a1c", 
+                    "HD" = "#377eb8", 
+                    "HTN" = "#4daf4a",
+                    "HF_StageC" = "#984ea3")
+
+proj <- addMotifAnnotations(ArchRProj = proj, 
+                            motifSet = "cisbp", 
+                            name = "Motif",
+                            force = TRUE)
+
+proj <- addBgdPeaks(proj)
+
+proj <- addDeviationsMatrix(
+  ArchRProj = proj, 
+  peakAnnotation = "Motif",
+  force = TRUE
+)
+```
+
+## Iterative Latent Semantic Indexing (LSI)
+```{r}
+proj <- addIterativeLSI(ArchRProj = proj,
+                        name = "IterativeLSI",
+                        force = TRUE)
+```
+
+## Batch Effect Correction wtih Harmony
+```{r}
+proj <- addHarmony(
+    ArchRProj = proj,
+    reducedDims = "IterativeLSI",
+    name = "Harmony",
+    groupBy = "Sample",
+    force = TRUE
+)
+
+proj <- addUMAP(
+    ArchRProj = proj, 
+    reducedDims = "IterativeLSI", 
+    name = "UMAP",
+    force = TRUE,
+    minDist = 0.1
+)
+
+proj <- addUMAP(
+    ArchRProj = proj, 
+    reducedDims = "Harmony", 
+    name = "UMAP_Harmony", 
+    force = TRUE,
+    minDist = 0.1
+)
+```
+
+
+## Clustering and Visualizing using IterativeLSI 
+```{r, fig.height=6, fig.width=12}
+p1 <- plotEmbedding(ArchRProj = proj, 
+                    colorBy = "cellColData", 
+                    name = "Sample", 
+                    embedding = "UMAP",
+                    labelAsFactors = FALSE,
+                    plotAs = "points",
+                    labelSize = 0) +
+    theme_classic() +
+    ggtitle("Unintegrated") +
+    xlab("UMAP1") + ylab("UMAP2")
+
+p2 <- plotEmbedding(ArchRProj = proj, 
+                    colorBy = "cellColData", 
+                    name = "Sample", 
+                    embedding = "UMAP_Harmony",
+                    labelAsFactors = FALSE,
+                    plotAs = "points",
+                    labelSize = 0) +
+    theme_classic() +
+        ggtitle("Integrated") +
+    xlab("UMAP1") + ylab("UMAP2")
+
+p3 <- plotEmbedding(ArchRProj = proj, 
+                    colorBy = "cellColData", 
+                    name = "Condition", 
+                    embedding = "UMAP",
+                    labelAsFactors = FALSE,
+                    plotAs = "points",
+                    labelSize = 0) +
+    scale_color_manual(values = cols.condition) +
+    theme_classic() +
+        ggtitle("Unintegrated") +
+    xlab("UMAP1") + ylab("UMAP2")
+
+p4 <- plotEmbedding(ArchRProj = proj, 
+                    colorBy = "cellColData", 
+                    name = "Condition", 
+                    embedding = "UMAP_Harmony",
+                    labelAsFactors = FALSE,
+                    plotAs = "points",
+                    labelSize = 0) +
+        scale_color_manual(values = cols.condition) +
+    theme_classic() +
+            ggtitle("Integrated") +
+    xlab("UMAP1") + ylab("UMAP2")
+
+ggAlignPlots(p1, p2, type = "h")
+ggAlignPlots(p3, p4, type = "h")
+```
+
+
+## QC check
+```{r, fig.height=4, fig.width=8}
+p1 <- plotEmbedding(ArchRProj = proj, 
+                    colorBy = "cellColData", 
+                    name = "TSSEnrichment", 
+                    embedding = "UMAP") +
+    theme_classic() +
+    xlab("UMAP1") + ylab("UMAP2") +
+    ggtitle("TSSEnrichment")
+
+p2 <- plotEmbedding(ArchRProj = proj, 
+                    colorBy = "cellColData", 
+                    name = "log10(nFrags)", 
+                    embedding = "UMAP")+
+    theme_classic() +
+    xlab("UMAP1") + ylab("UMAP2") +
+    ggtitle("TSSEnrichment")
+
+p3 <- plotEmbedding(ArchRProj = proj, 
+                    colorBy = "cellColData", 
+                    name = "DoubletScore", 
+                    embedding = "UMAP") +
+    theme_classic() +
+    xlab("UMAP1") + ylab("UMAP2") +
+    ggtitle("DoubletScore")
+
+p4 <- plotEmbedding(ArchRProj = proj, 
+                    colorBy = "cellColData", 
+                    name = "DoubletEnrichment", 
+                    embedding = "UMAP")+
+    theme_classic() +
+    xlab("UMAP1") + ylab("UMAP2") +
+    ggtitle("DoubletEnrichment")
+
+ggAlignPlots(p1, p2, type = "h")
+ggAlignPlots(p3, p4, type = "h")
+```
+
+
+## save data
+```{r}
+saveArchRProject(ArchRProj = proj, 
+                 load = FALSE)
+```
+
+## Session information
+```{r}
+sessionInfo()
+```

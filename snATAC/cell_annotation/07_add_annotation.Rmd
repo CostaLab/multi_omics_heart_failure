@@ -1,0 +1,243 @@
+---
+title: "Analyze data using ArchR"
+author: "Zhijian Li"
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(ggplot2)
+library(stringr)
+library(magrittr)
+library(WriteXLS)
+library(tidyr)
+library(dplyr)
+library(plotly)
+library(cluster)
+library(cowplot)
+library(gridExtra)
+library(viridis)
+library(GenomicRanges)
+library(GenomeInfoDb)
+library(data.table)
+library(ArchR)
+library(Seurat)
+```
+
+```{r set_parameters, echo=FALSE}
+## set parameters
+set.seed(42)
+addArchRThreads(threads = parallel::detectCores() - 2)
+addArchRGenome("hg38")
+```
+
+## Loading Arrow Files
+```{r}
+proj <- loadArchRProject(path = "./HFFiltering", showLogo = FALSE)
+
+cols.condition <- c("Control" = "#e41a1c", 
+                    "HF_CKD" = "#377eb8", 
+                    "HF_A" = "#4daf4a")
+
+proj <- addUMAP(
+    ArchRProj = proj, 
+    reducedDims = "Harmony", 
+    name = "UMAP_Harmony", 
+    force = TRUE
+)
+```
+
+
+## add annotation
+```{r}
+newLabels <- c("0" = "fibroblast", # SCARA5
+               "1" = "macrophages", # CD163
+               "2" = "endothelial", # VWF, PECAM1
+               "4" = "pericyte", #NOTCH3
+               "5" = "cardiomyocyte",
+               "6" = "cardiomyocyte",
+               "7" = "T-cells",
+               "8" = "adipocytes",
+               "9" = "vSMCs",
+               "11" = "cardiomyocyte",
+               "12" = "mast_cells",
+               "13" = "fibroblast",
+               "14" = "cardiomyocyte",
+               "15" = "cardiomyocyte",
+               "16" = "endothelial",
+               "17" = "fibroblast",
+               "18" = "macrophages",
+               "19" = "endothelial",
+               "20" = "pericyte",
+               "21" = "neuronal",
+               "22" = "fibroblast",
+               "23" = "pericyte"
+               )
+
+proj$CellType <- mapLabels(proj$Clusters, 
+                           newLabels = newLabels,
+                           oldLabels = names(newLabels))
+```
+
+
+## visualize cluster
+```{r, fig.height=6, fig.width=6}
+p1 <- plotEmbedding(ArchRProj = proj, 
+                    colorBy = "cellColData", 
+                    name = "Clusters", 
+                    embedding = "UMAP_Harmony",
+                    labelAsFactors = FALSE,
+                    plotAs = "points") +
+    theme_classic() +
+    xlab("UMAP1") + ylab("UMAP2") +
+    ggtitle("Cluster")
+    
+
+p2 <- plotEmbedding(ArchRProj = proj, 
+                    colorBy = "cellColData", 
+                    name = "CellType", 
+                    embedding = "UMAP_Harmony",
+                    labelAsFactors = FALSE,
+                    plotAs = "points") +
+    theme_classic() +
+    xlab("UMAP1") + ylab("UMAP2") +
+    ggtitle("CellType")
+    
+print(p1)
+print(p2)
+```
+
+
+## marker genes per cell type
+```{r, fig.height=8, fig.width=6}
+markerGenes  <- c(
+    "TNNT2", "RYR2", "TNNT1", 
+    "MYOM3", "MYLK3", "CAMK2B", #cardiomyocyte
+    "PDGFRB", "DCN", "SCARA5", "COL15A1", #fibroblast
+    "CD163", "CD86", "HCK", "SLC11A1", "SIGLEC1", #monocytes
+    "PECAM1", "VWF", "EGFL7", "EMCN", "ERG", "TIE1", #endothelial
+    "NOTCH3", "RGS5", "ABCC9", "COX4I2", "EGFLAM", #pericyte
+    "PTPRC", "CD247", "CD2", "ITK", "PRKCQ", # T-cells
+    "NRXN1", "SOX10", "SPP1", "GRIK3", "NRXN2", #neuronal
+    "ADIPOQ", "PLIN1", "FASN", #adipocytes
+    "KIT", "CPA3", "SLC38A11", "SLC8A3", #mast_cells
+    "MYH11", "MYLK" #vSMCs
+    )
+
+markersGS <- getMarkerFeatures(
+    ArchRProj = proj,
+    useMatrix = "GeneScoreMatrix",
+    groupBy = "CellType",
+    bias = c("TSSEnrichment", "log10(nFrags)"),
+    testMethod = "wilcoxon"
+)
+
+markerList <- getMarkers(markersGS,
+                         cutOff = "FDR <= 0.01 & Log2FC >= 1")
+
+heatmapGS <- plotMarkerHeatmap(
+  seMarker = markersGS,
+  cutOff = "FDR <= 0.01 & Log2FC >= 1",
+  labelMarkers = markerGenes
+)
+
+ComplexHeatmap::draw(heatmapGS,
+                     heatmap_legend_side = "bot",
+                     annotation_legend_side = "bot")
+
+markerList <- getMarkers(markersGS)
+markerList <- lapply(markerList, as.data.frame)
+
+saveRDS(markersGS, file = "./HFFiltering/MarkerGenes_CellType.Rds")
+
+for(i in 1:length(markerList)){
+    markerList[[i]] <- markerList[[i]][order(-markerList[[i]]$MeanDiff), ]
+}
+
+WriteXLS::WriteXLS(markerList,
+                   ExcelFileName = "./HFFiltering/MarkerGenes_CellType.xlsx",
+                   SheetNames = names(markerList))
+
+
+```
+
+## peak calling
+```{r}
+proj <- addGroupCoverages(ArchRProj = proj, 
+                          groupBy = "CellType",
+                          force = TRUE)
+
+
+pathToMacs2 <- findMacs2()
+
+proj <- addReproduciblePeakSet(
+    ArchRProj = proj, 
+    groupBy = "CellType", 
+    pathToMacs2 = pathToMacs2,
+    force = TRUE
+)
+
+getPeakSet(proj)
+
+proj <- addPeakMatrix(proj, force = TRUE)
+```
+
+## generate pulk count matrix profiles
+```{r}
+PeakMatrix <- getMatrixFromProject(proj, useMatrix = "PeakMatrix")
+
+counts <- PeakMatrix@assays@data$PeakMatrix
+df_rangers <- as.data.frame(PeakMatrix@rowRanges@ranges)
+
+rownames(counts) <- paste(PeakMatrix@rowRanges@seqnames,
+                          df_rangers$start,
+                          df_rangers$end,
+                          sep = "_") 
+
+df <- as.data.frame(proj@cellColData)
+
+bulkPeakMatrix <- lapply(unique(df$CellType), function(x){
+    df2 <- subset(df, CellType == x)
+  
+    bulk <- rowSums(counts[, rownames(df2)]) %>%
+        as.data.frame()
+    colnames(bulk) <- x
+    
+    bulk
+    
+}) %>% Reduce(cbind, .)
+
+
+write.csv(bulkPeakMatrix, file = "./HFFiltering/bulkPeakMatrix_CellType.txt",
+          quote = FALSE)
+
+
+bulkPeakMatrix <- lapply(unique(df$ConditionCellType), function(x){
+    df2 <- subset(df, ConditionCellType == x)
+  
+    bulk <- rowSums(counts[, rownames(df2)]) %>%
+        as.data.frame()
+    colnames(bulk) <- x
+    
+    bulk
+    
+}) %>% Reduce(cbind, .)
+
+
+write.csv(bulkPeakMatrix, file = "./HFFiltering/bulkPeakMatrix_Condition_CellType.txt",
+          quote = FALSE)
+
+```
+
+
+
+## save data
+```{r}
+saveArchRProject(ArchRProj = proj, 
+                 load = FALSE)
+```
+
+## Session information
+```{r}
+sessionInfo()
+```

@@ -1,0 +1,151 @@
+---
+title: "Analyze data using ArchR"
+author: "Zhijian Li"
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(ggplot2)
+library(stringr)
+library(magrittr)
+library(WriteXLS)
+library(tidyr)
+library(dplyr)
+library(plotly)
+library(cluster)
+library(cowplot)
+library(gridExtra)
+library(viridis)
+library(GenomicRanges)
+library(GenomeInfoDb)
+library(data.table)
+library(ArchR)
+library(Seurat)
+```
+
+```{r set_parameters, echo=FALSE}
+## set parameters
+set.seed(42)
+addArchRThreads(threads = parallel::detectCores() - 2)
+addArchRGenome("hg38")
+```
+
+## Loading Arrow Files
+```{r}
+proj <- loadArchRProject(path = "./HF", showLogo = FALSE)
+
+cols.condition <- c("Health" = "#e41a1c", 
+                    "HD" = "#377eb8", 
+                    "HTN" = "#4daf4a",
+                    "HF_StageC" = "#984ea3")
+
+obj <- readRDS("./HF/Seurat.Rds")
+
+set.res <- seq(0.1, 1, 0.1)
+
+meta.data <- obj@meta.data
+meta.data <- meta.data[rownames(proj), ]
+```
+
+## visualize cluster
+```{r}
+
+for (res in set.res) {
+    clusters <- meta.data[, paste("RNA_snn_res.", res, sep="")]
+    
+    proj <- addCellColData(proj, 
+                       data =  as.character(clusters), 
+                       name = "Clusters", 
+                       cells = rownames(proj), 
+                       force = TRUE)
+    
+    p1 <- plotEmbedding(ArchRProj = proj, 
+                    colorBy = "cellColData", 
+                    name = "Clusters", 
+                    embedding = "UMAP_Harmony",
+                    labelAsFactors = FALSE,
+                    plotAs = "points") +
+    theme_classic() +
+    xlab("UMAP1") + ylab("UMAP2")
+    
+    p2 <- plotGroups(ArchRProj = proj,
+                     colorBy = "cellColData",
+                     name = "log10(nFrags)",
+                     groupBy = "Clusters",
+                     plotAs = "violin")
+    
+    p3 <- plotGroups(ArchRProj = proj,
+                     colorBy = "cellColData",
+                     name = "DoubletScore",
+                     groupBy = "Clusters",
+                     plotAs = "violin")
+    
+    print(p1)
+    print(p2)
+    print(p3)
+}
+
+```
+
+
+
+## visualize marker genes
+```{r, fig.height=8, fig.width=6}
+markerGenes  <- c(
+    "TNNT2", "RYR2", "TNNT1", 
+    "MYOM3", "MYLK3", "CAMK2B", #cardiomyocyte
+    "PDGFRB", "DCN", "SCARA5", "COL15A1", #fibroblast
+    "CD163", "CD86", "HCK", "SLC11A1", "SIGLEC1", #monocytes
+    "PECAM1", "VWF", "EGFL7", "EMCN", "ERG", "TIE1", #endothelial
+    "NOTCH3", "RGS5", "ABCC9", "COX4I2", "EGFLAM", #pericyte
+    "PTPRC", "CD247", "CD2", "ITK", "PRKCQ", # T-cells
+    "NRXN1", "SOX10", "SPP1", "GRIK3", #neuronal
+    "ADIPOQ", "PLIN1", "FASN", #adipocytes
+    "KIT", "CPA3", "SLC38A11", "SLC8A3", #mast_cells
+    "MYH11", "MYLK" #vSMCs
+    )
+
+for (res in set.res) {
+    clusters <- meta.data[, paste("RNA_snn_res.", res, sep="")]
+    
+    proj <- addCellColData(proj, 
+                       data =  as.character(clusters), 
+                       name = "Clusters", 
+                       cells = rownames(proj), 
+                       force = TRUE)
+    
+    markersGS <- getMarkerFeatures(
+    ArchRProj = proj,
+    useMatrix = "GeneScoreMatrix",
+    groupBy = "Clusters",
+    bias = c("TSSEnrichment", "log10(nFrags)"),
+    testMethod = "wilcoxon"
+)
+    
+    markerList <- getMarkers(markersGS,
+                         cutOff = "FDR <= 0.01 & Log2FC >= 1")
+
+heatmapGS <- plotMarkerHeatmap(
+  seMarker = markersGS, 
+  cutOff = "FDR <= 0.01 & Log2FC >= 1", 
+  labelMarkers = markerGenes
+)
+
+ComplexHeatmap::draw(heatmapGS, 
+                     heatmap_legend_side = "bot", 
+                     annotation_legend_side = "bot")
+}
+```
+
+
+## save data
+```{r}
+#saveArchRProject(ArchRProj = proj, 
+#                 load = FALSE)
+```
+
+## Session information
+```{r}
+sessionInfo()
+```

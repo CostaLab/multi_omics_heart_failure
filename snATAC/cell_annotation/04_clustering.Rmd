@@ -1,0 +1,125 @@
+---
+title: "Analyze data using ArchR"
+author: "Zhijian Li"
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(ggplot2)
+library(stringr)
+library(magrittr)
+library(WriteXLS)
+library(tidyr)
+library(dplyr)
+library(plotly)
+library(cluster)
+library(cowplot)
+library(gridExtra)
+library(viridis)
+library(GenomicRanges)
+library(GenomeInfoDb)
+library(data.table)
+library(ArchR)
+library(Seurat)
+```
+
+```{r set_parameters, echo=FALSE}
+## set parameters
+set.seed(42)
+addArchRThreads(threads = parallel::detectCores() - 2)
+addArchRGenome("hg38")
+```
+
+## Loading Arrow Files
+```{r}
+proj <- loadArchRProject(path = "./HF", showLogo = FALSE)
+
+cols.condition <- c("Health" = "#e41a1c", 
+                    "HD" = "#377eb8", 
+                    "HTN" = "#4daf4a",
+                    "HF_StageC" = "#984ea3")
+
+```
+
+
+## Select number of clusters
+```{r clustering, fig.height=10, fig.width=8}
+matDR <- getReducedDims(proj, reducedDims = "Harmony")
+
+print(dim(matDR))
+
+tmp <- matrix(rnorm(nrow(matDR) * 3, 10), 
+              ncol = nrow(matDR), nrow = 3)
+colnames(tmp) <- rownames(matDR)
+rownames(tmp) <- paste0("t", seq_len(nrow(tmp)))
+    
+obj <- CreateSeuratObject(tmp, project = "scATAC", 
+                          min.cells = 0, 
+                          min.features = 0)
+obj[["pca"]] <- CreateDimReducObject(embeddings = matDR, 
+                                     key = "PC_", 
+                                     assay = "RNA")
+
+obj <- FindNeighbors(object = obj, 
+                     dims = 1:ncol(matDR))
+
+# optimize resolution for clustering
+# https://gist.github.com/BenjaminDoran/a4c8939b2f180b5ddf7e9179697d07ba
+######## calculate the FindClusters over a large range of resolutions
+print("Performing parameter scan over multiple resolutions...")
+set.res <- seq(0.1, 1, 0.1)
+obj <- FindClusters(object = obj, 
+                    resolution = set.res,
+                    random.seed = 42)
+
+suppressPackageStartupMessages(library(clustree))
+clustree(obj@meta.data, prefix = "RNA_snn_res.")
+```
+
+
+## Optimizing resolution
+```{r sil_score, fig.height=6, fig.width=6}
+print("Computing a silhouette width for each cell, for each resolution...")
+require(cluster)
+
+dist <- dist(obj@reductions$pca@cell.embeddings,
+             method = "euclidean",
+             upper = TRUE)
+
+silhouette_scores <- lapply(set.res, function(x){
+    clusters <- obj@meta.data[, paste("RNA_snn_res.", x, sep="")]
+    si <- silhouette(as.numeric(as.vector(clusters)), dist)
+    mean(si[, 'sil_width'])
+})
+
+opt_res <- set.res[which.max(silhouette_scores)]
+
+df.plot <- data.frame(resolution = set.res,
+                      silhouette_scores = unlist(silhouette_scores))
+
+p <- ggplot(data = df.plot, aes(x = resolution,
+                                y = silhouette_scores)) +
+    geom_vline(xintercept = opt_res) +
+    geom_point() +
+    geom_line() +
+    scale_x_continuous(breaks = set.res) +
+    ggtitle(label = sprintf("best resolution: %s", opt_res))
+
+print(p)
+```
+
+
+## save data
+```{r}
+saveArchRProject(ArchRProj = proj, 
+                 load = FALSE)
+
+saveRDS(obj, file = "./HF/Seurat.Rds")
+
+```
+
+## Session information
+```{r}
+sessionInfo()
+```

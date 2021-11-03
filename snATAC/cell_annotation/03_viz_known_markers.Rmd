@@ -1,0 +1,338 @@
+---
+title: "Analyze data using ArchR"
+author: "Zhijian Li"
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(ggplot2)
+library(stringr)
+library(magrittr)
+library(WriteXLS)
+library(tidyr)
+library(dplyr)
+library(plotly)
+library(cluster)
+library(cowplot)
+library(gridExtra)
+library(viridis)
+library(GenomicRanges)
+library(GenomeInfoDb)
+library(data.table)
+library(ArchR)
+```
+
+```{r set_parameters, echo=FALSE}
+## set parameters
+set.seed(42)
+addArchRThreads(threads = parallel::detectCores() - 2)
+addArchRGenome("hg38")
+```
+
+## Loading Arrow Files
+```{r}
+proj <- loadArchRProject(path = "./HF", showLogo = FALSE)
+proj <- addImputeWeights(proj)
+
+cols.condition <- c("Health" = "#e41a1c", 
+                    "HD" = "#377eb8", 
+                    "HTN" = "#4daf4a",
+                    "HF_StageC" = "#984ea3")
+```
+
+
+## Visualize marker of cardiomyocyte
+```{r cardiomyocyte, fig.height=8, fig.width=12}
+# cardiomyocyte
+p <- plotEmbedding(
+    ArchRProj = proj, 
+    colorBy = "GeneScoreMatrix", 
+    name = c("TNNT2", "RYR2", "TNNT1", 
+             "MYOM3", "MYLK3", "CAMK2B"), 
+    embedding = "UMAP_Harmony"
+)
+
+p2 <- lapply(p, function(x){
+    x + guides(color = FALSE, fill = FALSE) +
+        theme_cowplot() +
+        xlab("UMAP1") + ylab("UMAP2") +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+    )
+})
+
+do.call(cowplot::plot_grid, c(list(ncol = 3), p2))
+```
+
+# fibroblast
+```{r fibroblast, fig.height=8, fig.width=12}
+p <- plotEmbedding(
+    ArchRProj = proj, 
+    colorBy = "GeneScoreMatrix", 
+    name = c("PDGFRB", "DCN", "SCARA5", "COL15A1"), 
+    embedding = "UMAP_Harmony"
+)
+
+p2 <- lapply(p, function(x){
+    x + guides(color = FALSE, fill = FALSE) +
+        theme_cowplot() +
+        xlab("UMAP1") + ylab("UMAP2") +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+    )
+})
+
+do.call(cowplot::plot_grid, c(list(ncol = 3), p2))
+```
+
+
+# monocytes
+```{r monocytes, fig.height=8, fig.width=12}
+p <- plotEmbedding(
+    ArchRProj = proj, 
+    colorBy = "GeneScoreMatrix", 
+    name = c("CD163", "CD86", "HCK", "SLC11A1", "SIGLEC1"), 
+    embedding = "UMAP_Harmony"
+)
+
+p2 <- lapply(p, function(x){
+    x + guides(color = FALSE, fill = FALSE) +
+        theme_cowplot() +
+        xlab("UMAP1") + ylab("UMAP2") +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+    )
+})
+
+do.call(cowplot::plot_grid, c(list(ncol = 3), p2))
+```
+
+
+# endothelial
+```{r endothelial, fig.height=8, fig.width=12}
+p <- plotEmbedding(
+    ArchRProj = proj, 
+    colorBy = "GeneScoreMatrix", 
+    name = c("PECAM1", "VWF", "EGFL7", "EMCN", "ERG", "TIE1"), 
+    embedding = "UMAP_Harmony"
+)
+
+p2 <- lapply(p, function(x){
+    x + guides(color = FALSE, fill = FALSE) +
+        theme_cowplot() +
+        xlab("UMAP1") + ylab("UMAP2") +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+    )
+})
+
+do.call(cowplot::plot_grid, c(list(ncol = 3), p2))
+```
+
+
+# pericyte
+```{r pericyte, fig.height=8, fig.width=12}
+p <- plotEmbedding(
+    ArchRProj = proj, 
+    colorBy = "GeneScoreMatrix", 
+    name = c("NOTCH3", "RGS5", "ABCC9", "COX4I2", "EGFLAM"), 
+    embedding = "UMAP_Harmony"
+)
+
+p2 <- lapply(p, function(x){
+    x + guides(color = FALSE, fill = FALSE) +
+        theme_cowplot() +
+        xlab("UMAP1") + ylab("UMAP2") +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+    )
+})
+
+do.call(cowplot::plot_grid, c(list(ncol = 3), p2))
+```
+
+# T-cells
+```{r T-cells, fig.height=8, fig.width=12}
+p <- plotEmbedding(
+    ArchRProj = proj, 
+    colorBy = "GeneScoreMatrix", 
+    name = c("PTPRC", "CD247", "CD2", "ITK", "PRKCQ"), 
+    embedding = "UMAP_Harmony"
+)
+
+p2 <- lapply(p, function(x){
+    x + guides(color = FALSE, fill = FALSE) +
+        theme_cowplot() +
+        xlab("UMAP1") + ylab("UMAP2") +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+    )
+})
+
+do.call(cowplot::plot_grid, c(list(ncol = 3), p2))
+```
+
+# neuronal
+```{r neuronal, fig.height=8, fig.width=12}
+p <- plotEmbedding(
+    ArchRProj = proj, 
+    colorBy = "GeneScoreMatrix", 
+    name = c("NRXN1", "SOX10", "SPP1", "GRIK3"), 
+    embedding = "UMAP_Harmony"
+)
+
+p2 <- lapply(p, function(x){
+    x + guides(color = FALSE, fill = FALSE) +
+        theme_cowplot() +
+        xlab("UMAP1") + ylab("UMAP2") +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+    )
+})
+
+do.call(cowplot::plot_grid, c(list(ncol = 3), p2))
+```
+
+
+# adipocytes
+```{r adipocytes, fig.height=8, fig.width=12}
+p <- plotEmbedding(
+    ArchRProj = proj, 
+    colorBy = "GeneScoreMatrix", 
+    name = c("ADIPOQ", "PLIN1", "FASN"), 
+    embedding = "UMAP_Harmony"
+)
+
+p2 <- lapply(p, function(x){
+    x + guides(color = FALSE, fill = FALSE) +
+        theme_cowplot() +
+        xlab("UMAP1") + ylab("UMAP2") +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+    )
+})
+
+do.call(cowplot::plot_grid, c(list(ncol = 3), p2))
+```
+
+
+# mast_cells
+```{r mast_cells, fig.height=8, fig.width=12}
+p <- plotEmbedding(
+    ArchRProj = proj, 
+    colorBy = "GeneScoreMatrix", 
+    name = c("KIT", "CPA3", "SLC38A11", "SLC8A3"), 
+    embedding = "UMAP_Harmony"
+)
+
+p2 <- lapply(p, function(x){
+    x + guides(color = FALSE, fill = FALSE) +
+        theme_cowplot() +
+        xlab("UMAP1") + ylab("UMAP2") +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+    )
+})
+
+do.call(cowplot::plot_grid, c(list(ncol = 3), p2))
+```
+
+# vSMCs
+```{r vSMCs, fig.height=4, fig.width=12}
+p <- plotEmbedding(
+    ArchRProj = proj, 
+    colorBy = "GeneScoreMatrix", 
+    name = c("MYH11", "MYLK"), 
+    embedding = "UMAP_Harmony"
+)
+
+p2 <- lapply(p, function(x){
+    x + guides(color = FALSE, fill = FALSE) +
+        theme_cowplot() +
+        xlab("UMAP1") + ylab("UMAP2") +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    theme(
+        axis.text.x=element_blank(), 
+        axis.ticks.x=element_blank(), 
+        axis.text.y=element_blank(), 
+        axis.ticks.y=element_blank()
+    )
+})
+
+do.call(cowplot::plot_grid, c(list(ncol = 3), p2))
+```
+
+
+## Visualize NR3C2
+```{r}
+# p1 <- plotGroups(ArchRProj = proj,
+#                  groupBy = "Condition",
+#                  colorBy = "GeneScoreMatrix",
+#                  name = "NR3C2",
+#                  plotAs = "violin") +
+#     theme_cowplot()
+# 
+# markerMotifs <- getFeatures(proj, 
+#                             select = paste("NR3C2", collapse="|"), 
+#                             useMatrix = "MotifMatrix")
+# markerMotifs <- grep("z:", markerMotifs, value = TRUE)
+# 
+# p2 <- plotGroups(ArchRProj = proj,
+#                  groupBy = "Condition",
+#                  colorBy = "MotifMatrix",
+#                  name = markerMotifs,
+#                  plotAs = "violin") +
+#     theme_cowplot()
+# 
+# p1
+# p2
+```
+
+
+## save data
+```{r}
+saveArchRProject(ArchRProj = proj, 
+                 load = FALSE)
+```
+
+## Session information
+```{r}
+sessionInfo()
+```

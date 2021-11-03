@@ -1,0 +1,176 @@
+---
+title: "Analyze data using ArchR"
+author: "Zhijian Li"
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(ggplot2)
+library(stringr)
+library(magrittr)
+library(WriteXLS)
+library(tidyr)
+library(dplyr)
+library(plotly)
+library(cluster)
+library(cowplot)
+library(gridExtra)
+library(viridis)
+library(GenomicRanges)
+library(GenomeInfoDb)
+library(data.table)
+library(ArchR)
+library(Seurat)
+```
+
+```{r set_parameters, echo=FALSE}
+## set parameters
+set.seed(42)
+addArchRThreads(threads = parallel::detectCores() - 2)
+addArchRGenome("hg38")
+
+proj <- loadArchRProject(path = "./HFFiltering", showLogo = FALSE)
+obj.rna <- readRDS("../../snRNA/raw_integrated.rds")
+```
+
+## Loading Arrow Files
+```{r}
+cols.condition <- c("Control" = "#e41a1c", 
+                    "HF_CKD" = "#377eb8", 
+                    "HF_A" = "#4daf4a")
+
+
+sample2patient.rna <- c("CK114" = "YA5468",
+                        "CK115" = "YHJ323",
+                        "CK116" = "YKB285",
+                        "CK125" = "XG3005",
+                        "CK126" = "ZKY095",
+                        "CK127" = "YEI202",
+                        "CK128" = "YIH108",
+                        "CK129" = "YHN332",
+                        "CK135" = "YJM250",
+                        "CK136" = "YFV238",
+                        "CK137" = "YHC474",
+                        "CK138" = "YFV428",
+                        "CK139" = "YH5394",
+                        "CK140" = "YID393",
+                        "CK141" = "YF2299",
+                        "CK68" = "AABD005")
+
+# patient2condition <- c("AABD005" = "HF_CKD",
+#                        "YA5468" = "Control",
+#                        "YEI202" = "HF_A",
+#                        "YF2299" = "HF_A",
+#                        "YFV238" = "HF_CKD",
+#                        "YFV428" = "HF_CKD",
+#                        "YH5394" = "Control",
+#                        "YHC474" = "HF_A",
+#                        "YHJ323" = "Control",
+#                        "YHN332" = "HF_A",
+#                        "YID393" = "Control",
+#                        "YIH108" = "Control",
+#                        "YJM250" = "HF_A",
+#                        "YKB285" = "HF_CKD",
+#                        "ZKY095" = "HF_CKD")
+
+obj.rna@meta.data$Patient <- stringr::str_replace_all(obj.rna@meta.data$sample_id, 
+                                                  sample2patient.rna)
+obj.rna@meta.data$CellType <- obj.rna@meta.data$cell_type
+
+obj.rna@meta.data$Condition <- stringr::str_replace_all(obj.rna@meta.data$condition,
+                                                        c("healthy" = "Control",
+                                                          "hf_ckd" = "HF_CKD",
+                                                        "hf" = "HF_A"))
+```
+
+## get meta data from atac and rna
+```{r}
+df_atac <- proj@cellColData %>%
+    as.data.frame() %>%
+    subset(., select = c("Condition", "Patient", "CellType"))
+
+df_rna <- obj.rna@meta.data %>%
+    as.data.frame() %>%
+    subset(., select = c("Condition", "Patient", "CellType"))
+
+df_atac$Data <- "ATAC"
+df_rna$Data <- "RNA"
+```
+
+
+
+## check cell type proportion
+```{r, fig.width=12, fig.height=6}
+df <- rbind(df_atac, df_rna)
+df$Patient <- paste0(df$Condition, "_", df$Patient)
+
+
+df.sum <- df %>%
+    group_by(Data, Patient, CellType) %>%
+    summarise(Counts = n()) %>%
+    mutate(Frac = Counts/sum(Counts))
+
+
+pal <- paletteDiscrete(set = "stallion", 
+                       values = df.sum$CellType)
+
+print(pal)
+
+p <- ggplot(data = df.sum, aes(x = Patient, y = Frac, 
+                           fill = CellType)) +
+    geom_bar(stat = "identity") +
+    facet_wrap(~Data) +
+    scale_fill_manual(values = pal) +
+    xlab("") + ylab("Fraction of cells") +
+    theme_cowplot() +
+    theme(legend.title = element_blank(),
+          axis.text.x = element_text(hjust = 1, angle = 60))
+
+print(p)
+```
+
+## heatmap of samples using cell proportion
+```{r, fig.height=6, fig.width=7}
+library(ComplexHeatmap)
+
+df.sum.atac <- df.sum %>% 
+    subset(., Data == "ATAC") %>%
+    subset(., select = c("Patient", "CellType", "Frac")) %>%
+    spread(., Patient, Frac,  fill = 0)
+
+df.sum.rna <- df.sum %>% 
+    subset(., Data == "RNA") %>%
+    subset(., select = c("Patient", "CellType", "Frac")) %>%
+    spread(., Patient, Frac,  fill = 0)
+
+rownames(df.sum.atac) <- df.sum.atac$CellType
+df.sum.atac$CellType <- NULL
+
+rownames(df.sum.rna) <- df.sum.rna$CellType
+df.sum.rna$CellType <- NULL
+
+p1 <- Heatmap(cor(df.sum.atac),
+              name = "Pearson Correlation",
+              clustering_method_rows = "ward.D2",
+              clustering_method_columns = "ward.D2")
+p2 <- Heatmap(cor(df.sum.rna),
+              name = "Pearson Correlation",
+              clustering_method_rows = "ward.D2",
+              clustering_method_columns = "ward.D2")
+
+p1
+p2
+```
+
+## save data
+```{r}
+saveRDS(obj.rna, file = "../../snRNA/raw_integrated_update_metadata.rds")
+```
+
+
+
+## Session information
+```{r}
+sessionInfo()
+```
