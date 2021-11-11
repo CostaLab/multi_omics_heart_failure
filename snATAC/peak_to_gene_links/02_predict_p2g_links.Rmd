@@ -1,0 +1,292 @@
+---
+title: "Analyze data using ArchR"
+author: "Zhijian Li"
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(ggplot2)
+library(stringr)
+library(magrittr)
+library(WriteXLS)
+library(tidyr)
+library(dplyr)
+library(plotly)
+library(cluster)
+library(cowplot)
+library(gridExtra)
+library(viridis)
+library(GenomicRanges)
+library(GenomeInfoDb)
+library(data.table)
+library(ArchR)
+library(Seurat)
+library(ComplexHeatmap)
+library(Signac)
+```
+
+```{r set_parameters, echo=FALSE}
+## set parameters
+set.seed(42)
+addArchRThreads(threads = parallel::detectCores() - 2)
+addArchRGenome("hg38")
+
+proj <- loadArchRProject(path = "./HFFiltering", showLogo = FALSE)
+
+conditions <- unique(proj@cellColData$Condition)
+```
+
+## subset project
+```{r subset, eval = TRUE}
+for(condition in conditions){
+    df <- proj@cellColData %>%
+    subset(., Condition == condition)
+    
+    proj_sub <- subsetArchRProject(proj,
+                           cells = rownames(df),
+                           outputDirectory = glue::glue("./{condition}"),
+                           force = TRUE)
+    
+    saveArchRProject(proj_sub)
+}
+```
+
+
+## data integration
+```{r data_integration, fig.width=14, fig.height=6, eval = TRUE}
+library(harmony)
+
+for (condition in conditions) {
+    proj <- loadArchRProject(path = glue::glue("./{condition}"),
+                             showLogo = FALSE)
+        
+    df <- proj@cellColData %>%
+    as.data.frame()
+
+    pal_celltype <- paletteDiscrete(values = df$CellType)
+    pal_patient <- paletteDiscrete(values = df$Patient)
+
+    peakMatrix <- getMatrixFromProject(proj, useMatrix = "PeakMatrix")
+    peaks <- as.data.frame(peakMatrix@rowRanges)
+    peaks$peaks <- paste0(peaks$seqnames, ":", peaks$start, "_", peaks$end)
+    
+    mat <- peakMatrix@assays@data$PeakMatrix
+    rownames(mat) <- peaks$peaks
+
+    obj.atac <- CreateSeuratObject(counts = mat,
+                                   meta.data = as.data.frame(peakMatrix@colData),
+                                   assay = "peaks")
+    
+    print(obj.atac)
+    
+    obj.atac <- RunTFIDF(obj.atac)
+    obj.atac <- FindTopFeatures(obj.atac, min.cutoff = "q50")
+    obj.atac <- RunSVD(obj.atac)
+    
+    print(DepthCor(obj.atac))
+    
+    obj.atac <- RunUMAP(object = obj.atac, reduction = 'lsi', dims = 2:30)
+
+    
+    p1 <- DimPlot(obj.atac, reduction = "umap", group.by = "CellType",
+                  cols = pal_celltype)
+    p2 <- DimPlot(obj.atac, reduction = "umap", group.by = "Patient",
+                  cols = pal_patient)
+        
+    obj.atac <- RunHarmony(
+  object = obj.atac,
+  group.by.vars = 'Patient',
+  reduction = 'lsi',
+  assay.use = 'peaks',
+  project.dim = FALSE
+)
+    obj.atac <- RunUMAP(obj.atac, dims = 2:30, reduction = 'harmony',
+                        reduction.name = "umap_harmony")
+    
+    p3 <- DimPlot(obj.atac, reduction = "umap_harmony", group.by = "CellType",
+                  cols = pal_celltype)
+    p4 <- DimPlot(obj.atac, reduction = "umap_harmony", group.by = "Patient",
+                  cols = pal_patient)
+    
+    ggAlignPlots(p1, p2, type = "h")
+    ggAlignPlots(p3, p4, type = "h")
+    
+    saveRDS(obj.atac, file = glue::glue("./{condition}/seurat_integrated.Rds"))
+    
+    matDR <- obj.atac@reductions$harmony@cell.embeddings
+    colnames(matDR) <- paste0("Harmony", 1:ncol(matDR))
+    
+    proj@reducedDims[['Harmony']] <- SimpleList(matDR = matDR,
+                                      params = NA,
+                                      scaleDims = NA,
+                                      date = Sys.time(),
+                                      corToDepth = NA)
+    
+    embedding <- obj.atac@reductions$umap_harmony@cell.embeddings
+    colnames(embedding) <- c("Harmony#UMAP_Dimension_1",
+                         "Harmony#UMAP_Dimension_2")
+    proj@embeddings[["UMAP_Harmony"]] <- SimpleList(df = as.data.frame(embedding),
+                                      params = NULL)
+    
+    saveArchRProject(proj)
+    
+}
+```
+
+
+## add peak to gene links for each condition
+```{r, fig.height=10, fig.width=12}
+print(conditions)
+
+for (condition in conditions) {
+    proj <- loadArchRProject(path = glue::glue("./{condition}"),
+                             showLogo = FALSE)
+    table(proj@cellColData$Patient, 
+          proj@cellColData$CellType)
+        
+    pal <- paletteDiscrete(values = as.character(proj@cellColData$CellType))
+    
+    proj <- addPeak2GeneLinks(
+    ArchRProj = proj,
+    reducedDims = "Harmony",
+    useMatrix = "GeneExpressionMatrix",
+    dimsToUse = 2:30)
+    
+    saveArchRProject(proj)
+}
+```
+
+## define function
+```{r}
+library(ComplexHeatmap)
+library(circlize)
+
+# customize the heatmap
+plotHeatmap <- function(mat = NULL, limits = c(min(mat), max(mat)), 
+    colData = NULL, color = paletteContinuous(set = "solarExtra", 
+        n = 100), colorMap = NULL, 
+    row_split = NULL, column_split = NULL, name = "Heatmap",
+    column_order = NULL, row_order = NULL){
+  
+  breaks <- NULL
+    if (!is.null(limits)) {
+        mat[mat > max(limits)] <- max(limits)
+        mat[mat < min(limits)] <- min(limits)
+    }
+    else {
+        limits <- c(round(min(mat), 2), round(max(mat), 2))
+    }
+    mat <- (mat - min(limits))/(max(limits) - min(limits))
+    breaks <- seq(0, 1, length.out = length(color))
+    color <- circlize::colorRamp2(breaks, color)
+  
+    ht1Anno <- HeatmapAnnotation(df = colData, col = colorMap,
+            show_legend = TRUE, 
+            show_annotation_name = FALSE,
+            gp = gpar(col = "NA"))
+    
+      if(is.null(row_order)){
+        cluster_rows <- TRUE
+      } else{
+        cluster_rows <- FALSE
+      }
+    
+      if(is.null(column_order)){
+        cluster_columns <- TRUE
+      } else{
+        cluster_columns <- FALSE
+      }
+
+    
+        ht <- Heatmap(mat, 
+                       name = name, col = color, use_raster = TRUE,
+                           heatmap_legend_param = list(at = c(0, 1), 
+                                                       labels = c(round(min(limits), 
+            2), round(max(limits), 2)), 
+            color_bar = "continuous", 
+            legend_direction = "horizontal", legend_width = unit(3, "cm")),
+            row_split = row_split,
+            column_split = column_split,
+            top_annotation = ht1Anno,
+            raster_device = "png",
+                   show_column_dend = FALSE,
+                   show_row_dend = FALSE,
+                   show_row_names = FALSE,
+                   show_column_names = FALSE,
+                   raster_quality = 5,
+            cluster_rows = cluster_rows,
+            cluster_columns = cluster_columns,
+            cluster_column_slices = FALSE,
+            cluster_row_slices = FALSE,
+            column_gap = unit(0, "mm"),
+            column_title = NULL,
+            row_order = row_order,
+            column_order = column_order)
+        
+        return(ht)
+  
+}
+
+
+```
+
+## visualize p2g links by heatmap
+```{r, fig.height=8, fig.width=6}
+for (condition in conditions) {
+    proj <- loadArchRProject(path = glue::glue("./{condition}"),
+                             showLogo = FALSE)
+    pal <- paletteDiscrete(values = as.character(proj@cellColData$CellType))
+
+    out <- plotPeak2GeneHeatmap(ArchRProj = proj, 
+                                groupBy = c("CellType"),
+                                k = 10,
+                              returnMatrices = TRUE,
+                              nPlot = 100000)
+    
+    colData <- out$ATAC$colData
+    colnames(colData) <- "CellType"
+    colData$CellType <- factor(colData$CellType)
+    
+    
+    colorMap <- list(CellType = pal)
+    attr(colorMap[[1]], "discrete") <- TRUE
+    
+    
+    if(condition == "Control"){
+      row_split <- factor(out$ATAC$kmeansId, levels=c(3, 5, 2, 4, 10, 7, 9, 6, 8, 1))
+    } else if(condition == "HF_A"){
+      row_split <- factor(out$ATAC$kmeansId, levels=c(1, 2, 3, 4, 8, 7, 10, 9, 6, 5))
+    } else if(condition == "HF_CKD"){
+      row_split <- factor(out$ATAC$kmeansId, levels=c(5, 6, 10, 9, 2, 3, 4, 8, 7, 1))
+    }
+    
+    ht1 <- plotHeatmap(out$ATAC$matrix, limits = c(-1.5, 1.5),
+                       name = "ATAC-seq", colData = colData,
+                       color = paletteContinuous("solarExtra"),
+                       colorMap = colorMap,
+                       row_split = row_split,
+                       column_split = colData$CellType)
+
+    ht2 <- plotHeatmap(out$RNA$matrix, limits = c(-1.5, 1.5), 
+                       name = "RNA-seq", colData = colData,
+                       color = paletteContinuous("blueYellow"),
+                       colorMap = colorMap,
+                       row_order = unlist(row_order(ht1)),
+                       column_order = unlist(column_order(ht1)))
+    
+    
+    draw(ht1 + ht2, 
+         heatmap_legend_side = "bottom", 
+         annotation_legend_side = "right")
+    
+    saveRDS(out, file = glue::glue("./{condition}/p2g.Rds"))
+    
+}
+```
+
+
+## Session information
+```{r}
+sessionInfo()
+```
